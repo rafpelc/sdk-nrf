@@ -559,16 +559,26 @@ static void mqtt_evt_handler(struct mqtt_client *const c,
 			break;
 		}
 
-		if (!mqtt_evt->param.connack.session_present_flag) {
-			topic_subscribe();
-		}
-
 		LOG_DBG("MQTT client connected!");
 
 		aws_iot_evt.data.persistent_session =
 				   mqtt_evt->param.connack.session_present_flag;
 		aws_iot_evt.type = AWS_IOT_EVT_CONNECTED;
 		aws_iot_notify_event(&aws_iot_evt);
+
+		if (!mqtt_evt->param.connack.session_present_flag) {
+			err = topic_subscribe();
+			if (err) {
+				aws_iot_evt.type = AWS_IOT_EVT_ERROR;
+				aws_iot_evt.data.err = err;
+				aws_iot_notify_event(&aws_iot_evt);
+				break;
+			}
+		}
+
+		/** MQTT subscription established, or already subscribed
+		 *  in case of pre-existing session.
+		 */
 		aws_iot_evt.type = AWS_IOT_EVT_READY;
 		aws_iot_notify_event(&aws_iot_evt);
 		break;
