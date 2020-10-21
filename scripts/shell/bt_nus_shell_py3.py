@@ -10,6 +10,7 @@ import sys
 from _thread import *
 import argparse
 
+
 HOST = ''   # Symbolic name meaning all available interfaces
 PORT = 8889 # Arbitrary non-privileged port
 
@@ -24,54 +25,63 @@ parser.add_argument('--name', help='Device name (advertising name).',
                     nargs='*', required=True, default=None)
 args = parser.parse_args()
 
+
 def ble_driver_init(conn_ic_id):
     global BLEDriver, Flasher, DfuTransportBle
     from pc_ble_driver_py import config
     config.__conn_ic_id__ = conn_ic_id
 
+
 ble_driver_init(args.family[0])
 
+
 from nordicsemi.dfu.dfu_transport_ble import DFUAdapter
-from pc_ble_driver_py.exceptions      import NordicSemiException, IllegalStateException
-from pc_ble_driver_py.ble_driver      import config,Flasher,BLEDriver, BLEDriverObserver, BLEEnableParams, BLEUUIDBase, BLEUUID, BLEAdvData, BLEGapConnParams, NordicSemiException
-from pc_ble_driver_py.ble_driver      import ATT_MTU_DEFAULT
-from pc_ble_driver_py.ble_adapter     import BLEAdapter, BLEAdapterObserver, EvtSync
+from pc_ble_driver_py.exceptions import NordicSemiException, IllegalStateException
+from pc_ble_driver_py.ble_driver import config, Flasher, BLEDriver, BLEDriverObserver, BLEConfig, BLEConfigConnGatt,\
+    BLEEnableParams, BLEUUIDBase, BLEUUID, BLEAdvData, BLEGapConnParams, NordicSemiException
+from pc_ble_driver_py.ble_driver import ATT_MTU_DEFAULT
+from pc_ble_driver_py.ble_adapter import BLEAdapter, BLEAdapterObserver, EvtSync
+
+
+CFG_TAG = 1
 
 global nrf_sd_ble_api_ver
 nrf_sd_ble_api_ver = config.sd_api_ver_get()
 logger  = logging.getLogger(__name__)
 
+
 class BLE_Serial(BLEDriverObserver, BLEAdapterObserver):
-    BASE_UUID   = BLEUUIDBase([0x6E, 0x40, 0x00, 0x00, 0xB5, 0xA3, 0xF3, 0x93,
+    BASE_UUID = BLEUUIDBase([0x6E, 0x40, 0x00, 0x00, 0xB5, 0xA3, 0xF3, 0x93,
                                0xE0, 0xA9, 0xE5, 0x0E, 0x24, 0xDC, 0xCA, 0x9E])
 
-    RX_UUID     = BLEUUID(0x0003, BASE_UUID)
-    TX_UUID     = BLEUUID(0x0002, BASE_UUID)
-    LOCAL_ATT_MTU     = 23
+    RX_UUID = BLEUUID(0x0003, BASE_UUID)
+    TX_UUID = BLEUUID(0x0002, BASE_UUID)
+    LOCAL_ATT_MTU = 23
+
     def __init__(self, comport, periph_name, s_conn):
-        driver           = BLEDriver(serial_port    = comport,
-                                     baud_rate      = 115200)
-        adapter          = BLEAdapter(driver)
-        self.evt_sync           = EvtSync(['connected', 'disconnected'])
+        driver = BLEDriver(serial_port    = comport,
+                                     baud_rate      = 1000000)
+        adapter = BLEAdapter(driver)
+        self.evt_sync = EvtSync(['connected', 'disconnected'])
         self.target_device_name = periph_name
         self.target_device_addr = 0
-        self.conn_handle        = None
-        self.adapter            = adapter
-        self.notifications_q    = queue.Queue()
+        self.conn_handle = None
+        self.adapter = adapter
+        self.notifications_q = queue.Queue()
         self.adapter.observer_register(self)
         self.adapter.driver.observer_register(self)
         self.s_conn = s_conn
         self.adapter.driver.open()
-        ble_enable_params = BLEEnableParams(vs_uuid_count      = 10,
-                                            service_changed    = False,
-                                            periph_conn_count  = 0,
-                                            central_conn_count = 1,
-                                            central_sec_count  = 1)
+
         if nrf_sd_ble_api_ver >= 3:
             logger.info("\nBLE: ble_enable with local ATT MTU: {}".format(DFUAdapter.LOCAL_ATT_MTU))
-            ble_enable_params.att_mtu = BLE_Serial.LOCAL_ATT_MTU
 
-        self.adapter.driver.ble_enable(ble_enable_params)
+        gatt_cfg = BLEConfigConnGatt()
+        gatt_cfg.att_mtu = self.adapter.default_mtu
+        gatt_cfg.tag = CFG_TAG
+        self.adapter.driver.ble_cfg_set(BLEConfig.conn_gatt, gatt_cfg)
+
+        self.adapter.driver.ble_enable()
         self.adapter.driver.ble_vs_uuid_add(BLE_Serial.BASE_UUID)
 
         self.connect()
@@ -91,7 +101,7 @@ class BLE_Serial(BLEDriverObserver, BLEAdapterObserver):
         if nrf_sd_ble_api_ver >= 3:
             if DFUAdapter.LOCAL_ATT_MTU > ATT_MTU_DEFAULT:
                 logger.info('BLE: Enabling longer ATT MTUs')
-                self.att_mtu = self.adapter.att_mtu_exchange(self.conn_handle)
+                self.att_mtu = self.adapter.att_mtu_exchange(self.conn_handle, BLE_Serial.LOCAL_ATT_MTU)
                 logger.info('BLE: ATT MTU: {}'.format(self.att_mtu))
             else:
                 logger.info('BLE: Using default ATT MTU')
@@ -137,28 +147,30 @@ class BLE_Serial(BLEDriverObserver, BLEAdapterObserver):
 
         logger.debug("Received notification {}".format(len(data)))
 
-        #send to the socket
+        # send to the socket
         buf = [chr(x) for x in data]
         buf = ''.join(buf)
+        buf = bytes(buf, 'utf-8')
         self.s_conn.sendall(buf)
 
     def write_data(self, data):
         self.adapter.write_req(self.conn_handle, BLE_Serial.TX_UUID, data)
 
-#Function for handling connections. This will be used to create threads
-def clientthread(conn):
-    #Sending message to connected client
-    conn.send('Welcome to the server. Type something and hit enter\n') #send only takes string
 
-    #infinite loop so that function do not terminate and thread do not end.
+# Function for handling connections. This will be used to create threads
+def clientthread(conn):
+    # Sending message to connected client
+    conn.send(b'Welcome to the server. Type something and hit enter\n') #send only takes string
+
+    # infinite loop so that function do not terminate and thread do not end.
     buf = []
     while True:
-        #Receiving from client
+        # Receiving from client
         data = conn.recv(1024)
-        outbuf = [ord(x) for x in data]
+        outbuf = [ord(x) for x in data.decode('utf-8')]
         b.write_data(outbuf)
 
-    #came out of loop
+    # came out of loop
     conn.close()
 
 
@@ -184,8 +196,7 @@ s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 print('Socket created')
 
 
-
-#Bind socket to local host and port
+# Bind socket to local host and port
 try:
     s.bind((HOST, PORT))
 except socket.error as msg:
@@ -194,20 +205,20 @@ except socket.error as msg:
 
 print('Socket bind complete')
 
-#Start listening on socket
+# Start listening on socket
 s.listen(10)
 print('Socket now listening')
 
-#now keep talking with the client
+# now keep talking with the client
 while 1:
-    #wait to accept a connection - blocking call
+    # wait to accept a connection - blocking call
     conn, addr = s.accept()
     print('Connected with ' + addr[0] + ':' + str(addr[1]))
 
     b = BLE_Serial(comport, args.name, conn)
     print('BLE serial started')
 
-    #start new thread takes 1st argument as a function name to be run, second is the tuple of arguments to the function.
-    start_new_thread(clientthread ,(conn,))
+    # start new thread takes 1st argument as a function to be run, second is the tuple of arguments to the function.
+    start_new_thread(clientthread, (conn,))
 
 s.close()
